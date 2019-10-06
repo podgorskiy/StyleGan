@@ -119,12 +119,13 @@ class DiscriminatorBlock(nn.Module):
 
 
 class DecodeBlock(nn.Module):
-    def __init__(self, inputs, outputs, latent_size, has_first_conv=True, fused_scale=True):
+    def __init__(self, inputs, outputs, latent_size, has_first_conv=True, fused_scale=True, no=-1):
         super(DecodeBlock, self).__init__()
         self.has_first_conv = has_first_conv
         self.inputs = inputs
         self.has_first_conv = has_first_conv
         self.fused_scale = fused_scale
+        self.no = no
         if has_first_conv:
             if fused_scale:
                 self.conv_1 = ln.ConvTranspose2d(inputs, outputs, 3, 2, 1, bias=False, transform_kernel=True)
@@ -149,35 +150,62 @@ class DecodeBlock(nn.Module):
             self.bias_1.zero_()
             self.bias_2.zero_()
 
-    def forward(self, x, s1, s2):
+    def forward(self, x, d, s1, s2, addw):
         if self.has_first_conv:
             if not self.fused_scale:
                 x = upscale2d(x)
+                d = upscale2d(d)
             x = self.conv_1(x)
             x = self.blur(x)
+            d = self.conv_1(d)
+            d = self.blur(d)
 
-        x = torch.addcmul(x, value=1.0, tensor1=self.noise_weight_1, tensor2=torch.randn([x.shape[0], 1, x.shape[2], x.shape[3]]))
+        # x = torch.addcmul(x, value=1.0, tensor1=self.noise_weight_1, tensor2=torch.randn([x.shape[0], 1, x.shape[2], x.shape[3]]))
+
+        if addw:
+            d = d + self.noise_weight_1
 
         x = x + self.bias_1
 
         x = F.leaky_relu(x, 0.2)
 
+        m = (x > 0.0).float()
+        d = d * m + d * 0.2 * (1.0 - m)
+
+        xs = x.std(dim=[2, 3], keepdim=True)
+        d = d / xs
+
         x = self.instance_norm_1(x)
         
         x = style_mod(x, self.style_1(s1))
+        s = self.style_1(s1)
+        s = s.view(s.shape[0], 2, x.shape[1], 1, 1)
+        d = d * (s[:, 0] + 1)
 
         x = self.conv_2(x)
+        d = self.conv_2(d)
 
-        x = torch.addcmul(x, value=1.0, tensor1=self.noise_weight_2, tensor2=torch.randn([x.shape[0], 1, x.shape[2], x.shape[3]]))
+        # x = torch.addcmul(x, value=1.0, tensor1=self.noise_weight_2, tensor2=torch.randn([x.shape[0], 1, x.shape[2], x.shape[3]]))
+
+        if addw:
+            d = d + self.noise_weight_2
 
         x = x + self.bias_2
 
         x = F.leaky_relu(x, 0.2)
+        m = (x > 0.0).float()
+        d = d * m + d * 0.2 * (1.0 - m)
+        xs = x.std(dim=[2, 3], keepdim=True)
+        d = d / xs
+
         x = self.instance_norm_2(x)
         
         x = style_mod(x, self.style_2(s2))
+        s = self.style_2(s2)
+        s = s.view(s.shape[0], 2, x.shape[1], 1, 1)
+        d = d * (s[:, 0] + 1)
 
-        return x
+        return x, d
 
 
 class FromRGB(nn.Module):
@@ -199,9 +227,10 @@ class ToRGB(nn.Module):
         self.channels = channels
         self.to_rgb = ln.Conv2d(inputs, channels, 1, 1, 0, gain=1)
 
-    def forward(self, x):
+    def forward(self, x, d):
         x = self.to_rgb(x)
-        return x
+        d = self.to_rgb(d) - self.to_rgb.bias.view(1, -1, 1, 1)
+        return x, d
 
 
 class Discriminator(nn.Module):
@@ -301,7 +330,7 @@ class Generator(nn.Module):
             has_first_conv = i != 0
             fused_scale = resolution * 2 >= 128
 
-            block = DecodeBlock(inputs, outputs, latent_size, has_first_conv, fused_scale=fused_scale)
+            block = DecodeBlock(inputs, outputs, latent_size, has_first_conv, fused_scale=fused_scale, no=i)
 
             resolution *= 2
             self.layer_to_resolution[i] = resolution
@@ -317,14 +346,17 @@ class Generator(nn.Module):
 
         self.to_rgb = to_rgb
 
-    def decode(self, styles, lod, noise):
+    def decode(self, styles, lod, noise, wl):
         x = self.const
+        mul = 2**(self.layer_count-1)
+        inputs = min(self.maxf, self.startf * mul)
+        d = torch.zeros(1, inputs, 4, 4)
 
         for i in range(lod + 1):
-            x = self.decode_block[i](x, styles[:, 2 * i + 0], styles[:, 2 * i + 1])
+            x, d = self.decode_block[i](x, d, styles[:, 2 * i + 0], styles[:, 2 * i + 1], addw=True)#i == wl)
 
-        x = self.to_rgb[lod](x)
-        return x
+        x, d = self.to_rgb[lod](x, d)
+        return x, d
 
     def decode2(self, styles, lod, blend, noise):
         x = self.const
@@ -344,9 +376,9 @@ class Generator(nn.Module):
 
         return x
 
-    def forward(self, styles, lod, blend):
+    def forward(self, styles, lod, blend, wl=1):
         if blend == 1:
-            return self.decode(styles, lod, 1.)
+            return self.decode(styles, lod, 1., wl)
         else:
             return self.decode2(styles, lod, blend, 1.)
 

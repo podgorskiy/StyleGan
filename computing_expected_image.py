@@ -72,23 +72,33 @@ def sample(cfg, logger):
 
     checkpointer.load(file_name=file_name + '.pth')
 
-    rnd = np.random.RandomState(5)
+    #13 20 23
+    rnd = np.random.RandomState(27)
     latents = rnd.randn(1, cfg.MODEL.LATENT_SPACE_SIZE)
     sample = torch.tensor(latents).float().cuda()
 
     with torch.no_grad():
         model.eval()
         images = []
-        for i in range(100):
-            image = model.generate(model.generator.layer_count - 1, 1, z=sample)
+        for i in range(200):
+            im = []
+            for i in range(1):
+                torch.manual_seed(0)
+                image, d = model.generate(model.generator.layer_count - 1, 1, z=sample, wl=i)
+                im.append(torch.abs(d).mean(dim=1, keepdim=True))
+            save_image(image * 0.5 + 0.5, 'test_di.png')
+            save_image(torch.cat(im), 'test_dall.jpg', nrow=3)
+            exit()
 
             resultsample = (image * 0.5 + 0.5)
             images.append(resultsample)
 
     resultsample = torch.stack(images).mean(0)
+    resultsample_std = torch.stack(images).std(dim=[0, 1]) * 10.0
 
     save_image(images[0], 'test_individual.png')
     save_image(resultsample, 'test_average.png')
+    save_image(resultsample_std, 'test_std.png')
 
     # with torch.no_grad():
     #     model.eval()
