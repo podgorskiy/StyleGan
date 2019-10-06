@@ -19,6 +19,7 @@ import random
 import losses
 from net import Generator, Mapping, Discriminator
 import numpy as np
+from apex import amp
 
 
 class DLatent(nn.Module):
@@ -68,7 +69,7 @@ class Model(nn.Module):
         if self.dlatent_avg_beta is not None:
             with torch.no_grad():
                 batch_avg = styles.mean(dim=0)
-                self.dlatent_avg.buff.data.lerp_(batch_avg.data, 1.0 - self.dlatent_avg_beta)
+                self.dlatent_avg.buff.data.lerp_(batch_avg.data.float(), 1.0 - self.dlatent_avg_beta)
 
         if self.style_mixing_prob is not None:
             if random.random() < self.style_mixing_prob:
@@ -115,4 +116,4 @@ class Model(nn.Module):
             params = list(self.mapping.parameters()) + list(self.generator.parameters()) + list(self.dlatent_avg.parameters())
             other_param = list(other.mapping.parameters()) + list(other.generator.parameters()) + list(other.dlatent_avg.parameters())
             for p, p_other in zip(params, other_param):
-                p.data.lerp_(p_other.data, 1.0 - betta)
+                p.data.lerp_(p_other.data.float(), 1.0 - betta)

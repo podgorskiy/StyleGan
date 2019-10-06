@@ -30,6 +30,7 @@ from checkpointer import Checkpointer
 from scheduler import ComboMultiStepLR
 from custom_adam import LREQAdam
 from tqdm import tqdm
+from apex import amp
 
 
 torch.backends.cudnn.benchmark = True
@@ -95,6 +96,18 @@ def train(cfg, local_rank, world_size, distributed, logger):
         model_s.eval()
         model_s.requires_grad_(False)
 
+    generator_optimizer = LREQAdam([
+        {'params': model.generator.parameters()},
+        {'params': model.mapping.parameters()}
+    ], lr=cfg.TRAIN.BASE_LEARNING_RATE, betas=(cfg.TRAIN.ADAM_BETA_0, cfg.TRAIN.ADAM_BETA_1), weight_decay=0)
+
+    discriminator_optimizer = LREQAdam([
+        {'params': model.discriminator.parameters()},
+    ], lr=cfg.TRAIN.BASE_LEARNING_RATE, betas=(cfg.TRAIN.ADAM_BETA_0, cfg.TRAIN.ADAM_BETA_1), weight_decay=0)
+
+    [model.generator, model.mapping, model.discriminator], [generator_optimizer, discriminator_optimizer] = amp.initialize(
+        [model.generator, model.mapping, model.discriminator], [generator_optimizer, discriminator_optimizer], opt_level="O2", num_losses=2)
+
     if distributed:
         try:
             import apex
@@ -131,15 +144,6 @@ def train(cfg, local_rank, world_size, distributed, logger):
 
     arguments = dict()
     arguments["iteration"] = 0
-
-    generator_optimizer = LREQAdam([
-        {'params': generator.parameters()},
-        {'params': mapping.parameters()}
-    ], lr=cfg.TRAIN.BASE_LEARNING_RATE, betas=(cfg.TRAIN.ADAM_BETA_0, cfg.TRAIN.ADAM_BETA_1), weight_decay=0)
-
-    discriminator_optimizer = LREQAdam([
-        {'params': discriminator.parameters()},
-    ], lr=cfg.TRAIN.BASE_LEARNING_RATE, betas=(cfg.TRAIN.ADAM_BETA_0, cfg.TRAIN.ADAM_BETA_1), weight_decay=0)
 
     scheduler = ComboMultiStepLR(optimizers=
                                  {
@@ -229,7 +233,10 @@ def train(cfg, local_rank, world_size, distributed, logger):
                 discriminator_optimizer.zero_grad()
                 loss_d = model(x, lod2batch.lod, blend_factor, d_train=True)
                 tracker.update(dict(loss_d=loss_d))
-                loss_d.backward()
+
+                with amp.scale_loss(loss_d, discriminator_optimizer, loss_id=0) as loss_d_scaled:
+                    loss_d_scaled.backward()
+
                 discriminator_optimizer.step()
 
                 if local_rank == 0:
@@ -239,7 +246,10 @@ def train(cfg, local_rank, world_size, distributed, logger):
                 generator_optimizer.zero_grad()
                 loss_g = model(x, lod2batch.lod, blend_factor, d_train=False)
                 tracker.update(dict(loss_g=loss_g))
-                loss_g.backward()
+
+                with amp.scale_loss(loss_g, generator_optimizer, loss_id=0) as loss_g_scaled:
+                    loss_g_scaled.backward()
+
                 generator_optimizer.step()
 
                 lod2batch.step()
